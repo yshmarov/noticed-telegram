@@ -1,0 +1,104 @@
+# Publishes the gem to RubyGems when a v* tag is pushed, via RubyGems
+# trusted publishing (OIDC) — no API key, no OTP prompt.
+#
+# One-time setup on rubygems.org. Before the first release the gem doesn't
+# exist yet, so add a *pending* trusted publisher:
+#   Profile → Trusted publishers → Create → gem name: noticed-telegram,
+#   repository: yshmarov/noticed-telegram, workflow: release.yml,
+#   environment: release
+#
+# Release flow after that:
+#   git tag v0.x.y && git push origin v0.x.y
+#
+# We configure the OIDC credentials and then build + push directly, rather than
+# using rubygems/release-gem (which can publish successfully and then fail while
+# running the surrounding release task).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - name: Verify tag matches gem version
+        run: |
+          version="$(ruby -Ilib -r noticed/telegram/version -e 'print Noticed::Telegram::VERSION')"
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Validate release
+        run: |
+          bundle exec rake test
+          bundle exec rubocop
+          gem build noticed-telegram.gemspec
+      - name: Check whether this version is already published
+        id: release
+        env:
+          GEM_NAME: noticed-telegram
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ruby -rjson -rnet/http -ruri -e '
+            name, version = ARGV
+            uri = URI("https://rubygems.org/api/v1/versions/#{name}.json")
+            versions = JSON.parse(Net::HTTP.get(uri))
+            exit(versions.any? { |item| item.fetch("number") == version } ? 0 : 1)
+          ' "$GEM_NAME" "$version"
+          then
+            echo "$GEM_NAME $version is already published; nothing to do."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: rubygems/configure-rubygems-credentials@v2.1.0
+        if: steps.release.outputs.needed == 'true'
+      - name: Build and push the gem
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          gem push noticed-telegram-*.gem
+      - name: Verify the published version
+        env:
+          GEM_NAME: noticed-telegram
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in 1 2 3 4 5 6
+          do
+            if ruby -rjson -rnet/http -ruri -e '
+              name, version = ARGV
+              uri = URI("https://rubygems.org/api/v1/versions/#{name}.json")
+              versions = JSON.parse(Net::HTTP.get(uri))
+              exit(versions.any? { |item| item.fetch("number") == version } ? 0 : 1)
+            ' "$GEM_NAME" "$version"
+            then
+              exit 0
+            fi
+            echo "RubyGems has not indexed $GEM_NAME $version yet (attempt $attempt/6)."
+            sleep 5
+          done
+          exit 1
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1
+          then
+            echo "$GITHUB_REF_NAME already has a GitHub release."
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+              --title "noticed-telegram $GITHUB_REF_NAME"
+          fi
