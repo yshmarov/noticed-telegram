@@ -65,8 +65,28 @@ jobs:
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: rubygems/configure-rubygems-credentials@v2.1.0
+      # Same exchange as rubygems/configure-rubygems-credentials, plus `owner`:
+      # RubyGems only lets trusted publishing create a *new* gem when the
+      # workflow names the owning account, and no released version of that
+      # action accepts an owner yet. 193104 is the immutable RubyGems user ID
+      # shown on the Pending Trusted Publishers page.
+      - name: Exchange the OIDC token for a RubyGems API key
         if: steps.release.outputs.needed == 'true'
+        env:
+          RUBYGEMS_OWNER_ID: "193104"
+        run: |
+          jwt="$(curl -sS --fail-with-body \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rubygems.org" | jq -r .value)"
+          echo "::add-mask::$jwt"
+          key="$(curl -sS --fail-with-body -X POST \
+            https://rubygems.org/api/v1/oidc/trusted_publisher/exchange_token \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg jwt "$jwt" --arg owner "$RUBYGEMS_OWNER_ID" '{jwt: $jwt, owner: $owner}')" \
+            | jq -r .rubygems_api_key)"
+          test -n "$key" && test "$key" != "null"
+          echo "::add-mask::$key"
+          echo "GEM_HOST_API_KEY=$key" >> "$GITHUB_ENV"
       - name: Build and push the gem
         if: steps.release.outputs.needed == 'true'
         run: |
