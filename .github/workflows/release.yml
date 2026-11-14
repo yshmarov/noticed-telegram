@@ -96,19 +96,20 @@ jobs:
           GEM_NAME: noticed-telegram
         run: |
           version="${GITHUB_REF_NAME#v}"
-          for attempt in 1 2 3 4 5 6
+          for attempt in $(seq 1 12)
           do
             if ruby -rjson -rnet/http -ruri -e '
               name, version = ARGV
               uri = URI("https://rubygems.org/api/v1/versions/#{name}.json")
-              versions = JSON.parse(Net::HTTP.get(uri))
+              # A brand-new gem answers in plain text ("could not be found") until indexed.
+              versions = JSON.parse(Net::HTTP.get(uri)) rescue []
               exit(versions.any? { |item| item.fetch("number") == version } ? 0 : 1)
             ' "$GEM_NAME" "$version"
             then
               exit 0
             fi
-            echo "RubyGems has not indexed $GEM_NAME $version yet (attempt $attempt/6)."
-            sleep 5
+            echo "RubyGems has not indexed $GEM_NAME $version yet (attempt $attempt/12)."
+            sleep 10
           done
           exit 1
       - name: Create the GitHub release
